@@ -1,0 +1,16 @@
+pennylane>=0.34.0      
+pennylane-qiskit        
+qiskit>=1.0.0         
+qiskit-aer             
+qiskit-ibm-runtime     
+scikit-learn            
+pandas                  
+numpy                   
+imbalanced-learn        
+torch
+torchvision
+matplotlib              
+seaborn                 
+tqdm                    
+jupyterlab             
+openpyxl               
