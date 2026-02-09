@@ -13,7 +13,7 @@ from Utiles_Scheduler import tape_to_qiskit_script
 # --- CONFIGURACIÓN DEL HERO RUN ---
 SCHEDULER_URL = "http://localhost:8082/"
 MY_LOCAL_IP = "http://localhost:5000"   # Tu IP local o localhost
-BATCH_SIZE = 32                         # Tamaño del Batch
+BATCH_SIZE = 4                         # Tamaño del Batch, se ponen 4 para hacer pruebas mas chicas
 EPOCHS = 15                           # El objetivo final
 SHOTS = 1024                            # Disparos por circuito
 N_QUBITS = 6
@@ -82,6 +82,15 @@ async def handle_callback(request):
     try:
         data = await request.json()
         name = data.get("circuit_name")
+
+        debug_folder = "debug_responses"
+        os.makedirs(debug_folder, exist_ok=True)
+        
+        # Guardamos el JSON tal cual llega
+        with open(f"{debug_folder}/resp_{name}.json", "w") as f:
+            json.dump(data, f, indent=4)
+
+
         raw_counts = data.get("results")
         
         # Procesar resultado
@@ -195,7 +204,7 @@ async def train_hero_run():
                         "url": f"{MY_LOCAL_IP}/circuits/{fname}",
                         "shots": SHOTS,
                         "provider": ['ibm'],
-                        "policy": "multibatch",
+                        "policy": "time",
                         "criterio": 0,
                         "callback_url": f"{MY_LOCAL_IP}/callback",
                         "circuit_name": fname # Importante para identificar vuelta
