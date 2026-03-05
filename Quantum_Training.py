@@ -36,7 +36,14 @@ TRAIN_SIZE = 128
 X_train = torch.tensor(X[:TRAIN_SIZE], dtype=torch.float32)
 y_train = torch.tensor(y[:TRAIN_SIZE], dtype=torch.long)
 
-print(f"Datos cargados. {TRAIN_SIZE} muestras.")
+# 🟢 NORMALIZACIÓN: Escalar X_train entre 0 y Pi para AngleEmbedding
+x_min = X_train.min(dim=0, keepdim=True)[0]
+x_max = X_train.max(dim=0, keepdim=True)[0]
+# Evitar división por cero
+x_max = torch.where(x_max == x_min, x_max + 1e-8, x_max)
+X_train = np.pi * (X_train - x_min) / (x_max - x_min)
+
+print(f"✅ Datos cargados y normalizados. {TRAIN_SIZE} muestras.")
 
 # Definición QNode
 dev = qml.device("default.qubit", wires=N_QUBITS)
@@ -47,7 +54,7 @@ def qnode(inputs, weights):
     qml.StronglyEntanglingLayers(weights, wires=range(N_QUBITS))
     return qml.expval(qml.PauliZ(0))
 
-# Inicialización de Pesos
+# Inicialización de Pesos y Bias
 init_weights = 0.1 * torch.randn(2, N_QUBITS, 3)
 weights = torch.tensor(init_weights, requires_grad=True, dtype=torch.float32)
 bias = torch.tensor(0.0, requires_grad=True, dtype=torch.float32)
@@ -70,9 +77,6 @@ async def handle_callback(request):
         data = await request.json()
         name = data.get("circuit_name")
         raw_counts = data.get("results")
-        
-        # Debug opcional
-        # print(f"📩 Recibido: {name}")
 
         val = counts_to_expval(raw_counts)
         results_storage[name] = val
@@ -84,15 +88,13 @@ async def handle_callback(request):
         print(f"Error callback: {e}")
         return web.Response(status=500)
 
-# --- CORRECCIÓN: Función para servir archivos ---
+# 🟢 SERVIR ARCHIVOS: Permite al Scheduler descargar el archivo .py generado
 async def handle_file(request):
-    """Permite al Scheduler descargar el archivo .py generado"""
     name = request.match_info.get('name', "Anon")
     path = os.path.join("generated_circuits", name)
     if os.path.exists(path):
         return web.FileResponse(path)
     return web.Response(status=404)
-# -----------------------------------------------
 
 # --- 3. FUNCIONES DE CHECKPOINT ---
 def save_checkpoint(epoch, batch_idx, optimizer, loss):
@@ -100,12 +102,13 @@ def save_checkpoint(epoch, batch_idx, optimizer, loss):
     torch.save({
         'epoch': epoch,
         'batch_idx': batch_idx,
-        'weights': weights, # Guardamos el tensor
+        'weights': weights, 
         'bias': bias,
         'optimizer_state': optimizer.state_dict(),
-        'loss': loss
+        'loss': loss,
+        'x_min': x_min, # Guardamos factores de normalización por seguridad
+        'x_max': x_max
     }, CHECKPOINT_FILE)
-    # print(f"💾 Checkpoint guardado: Epoch {epoch} - Batch {batch_idx}")
 
 def load_checkpoint(optimizer):
     """Intenta cargar un entrenamiento previo."""
@@ -113,14 +116,13 @@ def load_checkpoint(optimizer):
         print(f"🔄 Encontrado checkpoint previo en {CHECKPOINT_FILE}")
         checkpoint = torch.load(CHECKPOINT_FILE)
         
-        # Restaurar datos. Usamos .data para no romper el grafo de gradientes
         with torch.no_grad():
             weights.data = checkpoint['weights'].data
             bias.data = checkpoint['bias'].data
         
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         start_epoch = checkpoint['epoch']
-        start_batch = checkpoint['batch_idx'] + 1 # Empezamos en el siguiente
+        start_batch = checkpoint['batch_idx'] + 1 
         
         print(f"⏩ Reanudando entrenamiento desde Epoch {start_epoch}, Batch {start_batch}")
         return start_epoch, start_batch
@@ -134,11 +136,7 @@ async def train_hero_run():
     
     # Setup Servidor
     app = web.Application()
-    
-    # --- CORRECCIÓN: Registrar la ruta de archivos ---
     app.router.add_get('/circuits/{name}', handle_file)
-    # -------------------------------------------------
-    
     app.router.add_post('/callback', handle_callback)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -163,26 +161,17 @@ async def train_hero_run():
         epoch_loss = 0
         batches_done = 0
         
-        # Importante: Usar la misma semilla o guardar el estado del generador
-        # sería ideal, pero para simplificar re-mezclamos.
         perm = torch.randperm(X_train.size(0))
-        
-        # Calculamos índice del batch manual
         batch_counter = 0
-        
-        # Determinar desde qué batch empezar en este epoch
         batch_start_from = start_batch_global if epoch == start_epoch else 0
 
         for i in range(0, len(X_train), BATCH_SIZE):
             
-            # --- LÓGICA DE REANUDACIÓN ---
-            # Si estamos en el epoch de reinicio y el batch es anterior al guardado, saltar.
             if batch_counter < batch_start_from:
                 print(f"⏩ Saltando Batch {batch_counter+1} (Ya procesado anteriormente)")
                 batch_counter += 1
                 continue 
 
-            # --- COMIENZO DEL BATCH REAL ---
             idx = perm[i:i+BATCH_SIZE]
             x_batch = X_train[idx]
             y_target = y_train[idx]
@@ -191,7 +180,7 @@ async def train_hero_run():
             tapes_to_send = []
             tape_map = [] 
             
-            # 1. Generar Tapes (Manual Tape Recording)
+            # 1. Generar Tapes 
             for j in range(len(x_batch)):
                 x_val = x_batch[j].detach().numpy()
                 with qml.tape.QuantumTape() as tape:
@@ -216,23 +205,18 @@ async def train_hero_run():
                 tasks = []
                 for k, tape in enumerate(tapes_to_send):
                     fname = f"e{epoch}_b{batch_counter}_t{k}.py"
-                    # Usamos tu función Utiles actualizada que genera QASM/Py
                     tape_to_qiskit_script(tape, fname, SHOTS)
                     
                     payload = {
-                        "url": f"{MY_LOCAL_IP}/circuits/{fname}", # Dummy, el scheduler lee el file
+                        "url": f"{MY_LOCAL_IP}/circuits/{fname}", 
                         "shots": SHOTS,
                         "provider": ['ibm'],
                         "policy": "multibatch",
                         "criterio": 0,
                         "callback_url": f"{MY_LOCAL_IP}/callback",
                         "circuit_name": fname,
-                        # IMPORTANTE: Si tu scheduler espera el código directamente,
-                        # asegúrate de que Utiles_Scheduler lo gestione o que el Scheduler lea el fichero.
-                        # Para asegurar, enviamos el path o leemos el fichero aquí:
                         "code": open(f"generated_circuits/{fname}", "r").read()
                     }
-                    # Nota: He añadido "code" al payload por seguridad si usas el Utiles nuevo
                     task = session.post(SCHEDULER_URL + 'circuit', json=payload)
                     tasks.append(task)
                 
@@ -243,37 +227,44 @@ async def train_hero_run():
             
             # 3. Calcular Gradientes y Actualizar
             grad_w_accum = torch.zeros_like(weights)
+            grad_b_accum = torch.tensor(0.0) 
             
             for j, start, count, fn in tape_map:
                 res_list = []
                 for k in range(start, start+count):
                     fname = f"e{epoch}_b{batch_counter}_t{k}.py"
-                    # Protección por si falta algún resultado (red robusta)
                     val = results_storage.get(fname, 0.0) 
                     res_list.append(val)
                 
                 grad_per_sample = fn(res_list)
                 g_w = torch.tensor(grad_per_sample[0], dtype=torch.float32)
                 
-                # Forward pass simulado para el error escalar
-                pred_sim = qnode(x_batch[j], weights) 
+                pred_sim = qnode(x_batch[j], weights) + bias 
                 error = pred_sim - y_target_pm[j]
+                
                 grad_w_accum += 2 * error * g_w
+                grad_b_accum += 2 * error 
 
             grad_w_accum /= len(x_batch)
-            
-            # Guardar pesos antes de actualizar (para debug)
-            weights_before = weights.clone().detach()
+            grad_b_accum /= len(x_batch) 
             
             weights.grad = grad_w_accum
+            bias.grad = grad_b_accum 
+            
+            # 🟢 CORRECCIÓN: Guardar estado antes de actualizar para calcular el cambio
+            weights_before = weights.clone().detach()
+
             optimizer.step()
             optimizer.zero_grad()
             
             # 4. Calcular métricas y mostrar depuración
-            batch_loss = torch.mean((qnode(x_batch, weights) - y_target_pm)**2)
+            # 🟢 CORRECCIÓN: Calcular la pérdida de forma segura sumando el bias
+            with torch.no_grad():
+                preds_batch = torch.stack([qnode(x_batch[j], weights) + bias for j in range(len(x_batch))])
+                batch_loss = torch.mean((preds_batch - y_target_pm)**2)
+            
             epoch_loss += batch_loss.item()
             
-            # Calcular cambio en los pesos
             weight_change = (weights - weights_before).abs().mean().item()
             grad_norm = grad_w_accum.norm().item()
             
