@@ -6,7 +6,7 @@ import os
 # --- CONFIGURACIÓN ---
 N_QUBITS = 6
 # Cambia esto si guardaste el archivo con otro nombre (ej. "model_epoch_15.pth")
-MODEL_PATH = "checkpoints_hero/checkpoint_latest.pth" 
+MODEL_PATH = "Modelos/1ºModelo.pth" 
 
 print("--- 1. Preparando Datos de Prueba ---")
 # Cargar todo el dataset
