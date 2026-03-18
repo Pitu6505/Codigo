@@ -7,7 +7,7 @@ import aiohttp
 import os
 import csv # 🟢 NUEVO: Para exportar a Excel
 import time
-from Utiles_Scheduler import tape_to_qiskit_script
+from Utiles_Scheduler import circuit_path, ensure_circuits_dir, tape_to_qiskit_script
 
 # --- CONFIGURACIÓN DEL HERO RUN ---
 SCHEDULER_URL = "http://localhost:8082/"
@@ -90,7 +90,7 @@ async def handle_callback(request):
 
 async def handle_file(request):
     name = request.match_info.get('name', "Anon")
-    path = os.path.join("generated_circuits", name)
+    path = circuit_path(name)
     if os.path.exists(path):
         return web.FileResponse(path)
     return web.Response(status=404)
@@ -141,7 +141,7 @@ async def train_hero_run():
     await site.start()
     print("🌐 Servidor Puente listo en port 5000")
 
-    os.makedirs("generated_circuits", exist_ok=True)
+    ensure_circuits_dir()
     os.makedirs("checkpoints_hero", exist_ok=True)
 
     optimizer = torch.optim.Adam([weights, bias], lr=LEARNING_RATE)
@@ -201,6 +201,8 @@ async def train_hero_run():
                 for k, tape in enumerate(tapes_to_send):
                     fname = f"e{epoch}_b{batch_counter}_t{k}.py"
                     tape_to_qiskit_script(tape, fname, SHOTS)
+                    with open(circuit_path(fname), "r") as circuit_file:
+                        code = circuit_file.read()
                     
                     payload = {
                         "url": f"{MY_LOCAL_IP}/circuits/{fname}", 
@@ -210,7 +212,7 @@ async def train_hero_run():
                         "criterio": 0,
                         "callback_url": f"{MY_LOCAL_IP}/callback",
                         "circuit_name": fname,
-                        "code": open(f"generated_circuits/{fname}", "r").read()
+                        "code": code
                     }
                     task = session.post(SCHEDULER_URL + 'circuit', json=payload)
                     tasks.append(task)
@@ -271,7 +273,7 @@ async def train_hero_run():
 
             for k in range(len(tapes_to_send)):
                 fname = f"e{epoch}_b{batch_counter}_t{k}.py"
-                fpath = os.path.join("generated_circuits", fname)
+                fpath = circuit_path(fname)
                 if os.path.exists(fpath):
                     os.remove(fpath)
             

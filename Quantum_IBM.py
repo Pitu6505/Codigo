@@ -5,20 +5,21 @@ import asyncio
 from aiohttp import web
 import aiohttp
 import os
-import shutil
-import json
+import csv
 import time
+from sklearn.decomposition import PCA # 🟢 IMPORTANTE: Importamos PCA
 from Utiles_Scheduler import circuit_path, ensure_circuits_dir, tape_to_qiskit_script
 
-# --- CONFIGURACIÓN DEL HERO RUN ---
+# --- CONFIGURACIÓN DEL HERO RUN OPTIMIZADO ---
 SCHEDULER_URL = "http://localhost:8082/"
 MY_LOCAL_IP = "http://localhost:5000"
 BATCH_SIZE = 32
 EPOCHS = 15
 SHOTS = 1024
-N_QUBITS = 6
+N_QUBITS = 4 # 🟢 REDUCIDO A 4 QUBITS
 LEARNING_RATE = 0.05
-CHECKPOINT_FILE = "checkpoints_hero/checkpoint_latest.pth" # Archivo maestro de guardado
+CHECKPOINT_FILE = "checkpoints_hero/checkpoint_m4_pca.pth" 
+CSV_FILE = "resultados_entrenamiento_m4_pca.csv" 
 
 # Variables Globales
 results_storage = {}
@@ -26,24 +27,29 @@ batch_event = asyncio.Event()
 current_batch_total = 0
 
 # --- 1. MODELO Y DATOS ---
-print("--- 1. Preparando Datos ---")
+print("--- 1. Preparando Datos (PCA Aplicado) ---")
 X = np.load('ArchivoRed/X_data.npy', allow_pickle=True)
 y = np.load('ArchivoRed/y_data.npy', allow_pickle=True)
 y = y.flatten().astype(int)
 y = np.array([0 if val <= 0 else 1 for val in y])
 
+# 🟢 COMPRESIÓN PCA (De 6 características a 4)
+pca = PCA(n_components=N_QUBITS)
+X_reducido = pca.fit_transform(X)
+varianza_retenida = sum(pca.explained_variance_ratio_) * 100
+print(f"✅ PCA completado. Varianza retenida: {varianza_retenida:.2f}%")
+
 TRAIN_SIZE = 128
-X_train = torch.tensor(X[:TRAIN_SIZE], dtype=torch.float32)
+X_train = torch.tensor(X_reducido[:TRAIN_SIZE], dtype=torch.float32)
 y_train = torch.tensor(y[:TRAIN_SIZE], dtype=torch.long)
 
-# 🟢 NORMALIZACIÓN: Escalar X_train entre 0 y Pi para AngleEmbedding
+# NORMALIZACIÓN ENTRE 0 Y PI
 x_min = X_train.min(dim=0, keepdim=True)[0]
 x_max = X_train.max(dim=0, keepdim=True)[0]
-# Evitar división por cero
 x_max = torch.where(x_max == x_min, x_max + 1e-8, x_max)
 X_train = np.pi * (X_train - x_min) / (x_max - x_min)
 
-print(f"✅ Datos cargados y normalizados. {TRAIN_SIZE} muestras.")
+print(f"✅ Datos normalizados. {TRAIN_SIZE} muestras listas para el circuito de {N_QUBITS} qubits.")
 
 # Definición QNode
 dev = qml.device("default.qubit", wires=N_QUBITS)
@@ -51,11 +57,11 @@ dev = qml.device("default.qubit", wires=N_QUBITS)
 @qml.qnode(dev)
 def qnode(inputs, weights):
     qml.AngleEmbedding(inputs, wires=range(N_QUBITS))
-    qml.StronglyEntanglingLayers(weights, wires=range(N_QUBITS))
+    # Circuito Superficial con menos qubits
+    qml.BasicEntanglerLayers(weights, wires=range(N_QUBITS))
     return qml.expval(qml.PauliZ(0))
 
-# Inicialización de Pesos y Bias
-init_weights = 0.1 * torch.randn(2, N_QUBITS, 3)
+init_weights = 0.1 * torch.randn(2, N_QUBITS) 
 weights = torch.tensor(init_weights, requires_grad=True, dtype=torch.float32)
 bias = torch.tensor(0.0, requires_grad=True, dtype=torch.float32)
 
@@ -85,10 +91,8 @@ async def handle_callback(request):
             batch_event.set()
         return web.Response(text="OK")
     except Exception as e:
-        print(f"Error callback: {e}")
         return web.Response(status=500)
 
-# 🟢 SERVIR ARCHIVOS: Permite al Scheduler descargar el archivo .py generado
 async def handle_file(request):
     name = request.match_info.get('name', "Anon")
     path = circuit_path(name)
@@ -98,7 +102,6 @@ async def handle_file(request):
 
 # --- 3. FUNCIONES DE CHECKPOINT ---
 def save_checkpoint(epoch, batch_idx, optimizer, loss):
-    """Guarda el estado actual para poder reanudar si se va la luz."""
     torch.save({
         'epoch': epoch,
         'batch_idx': batch_idx,
@@ -106,35 +109,29 @@ def save_checkpoint(epoch, batch_idx, optimizer, loss):
         'bias': bias,
         'optimizer_state': optimizer.state_dict(),
         'loss': loss,
-        'x_min': x_min, # Guardamos factores de normalización por seguridad
-        'x_max': x_max
+        'x_min': x_min, 
+        'x_max': x_max,
+        # Opcional: Guardar modelo PCA para inferencia futura, aunque aquí no es estrictamente necesario para el script de prueba simple
     }, CHECKPOINT_FILE)
 
 def load_checkpoint(optimizer):
-    """Intenta cargar un entrenamiento previo."""
     if os.path.exists(CHECKPOINT_FILE):
-        print(f"🔄 Encontrado checkpoint previo en {CHECKPOINT_FILE}")
         checkpoint = torch.load(CHECKPOINT_FILE)
-        
         with torch.no_grad():
             weights.data = checkpoint['weights'].data
             bias.data = checkpoint['bias'].data
-        
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         start_epoch = checkpoint['epoch']
         start_batch = checkpoint['batch_idx'] + 1 
-        
         print(f"⏩ Reanudando entrenamiento desde Epoch {start_epoch}, Batch {start_batch}")
         return start_epoch, start_batch
     else:
-        print("🆕 Iniciando entrenamiento desde cero.")
         return 0, 0
 
 # --- 4. CORE DE ENTRENAMIENTO ---
 async def train_hero_run():
     global weights, bias, current_batch_total
     
-    # Setup Servidor
     app = web.Application()
     app.router.add_get('/circuits/{name}', handle_file)
     app.router.add_post('/callback', handle_callback)
@@ -148,13 +145,14 @@ async def train_hero_run():
     os.makedirs("checkpoints_hero", exist_ok=True)
 
     optimizer = torch.optim.Adam([weights, bias], lr=LEARNING_RATE)
-    
-    # INTENTO DE CARGA DE CHECKPOINT
     start_epoch, start_batch_global = load_checkpoint(optimizer)
 
-    print(f"\n🚀 INICIANDO HERO RUN ({EPOCHS} Epochs) 🚀")
-    print(f"📊 Pesos iniciales - Min: {weights.min().item():.6f}, Max: {weights.max().item():.6f}, Media: {weights.mean().item():.6f}")
-    print(f"📊 Bias inicial: {bias.item():.6f}")
+    if start_epoch == 0 and start_batch_global == 0:
+        with open(CSV_FILE, mode='w', newline='') as file:
+            writer = csv.writer(file, delimiter=';')
+            writer.writerow(["Epoch", "Batch", "Loss", "Grad_Norm", "Weight_Change", "Bias"])
+
+    print(f"\n🚀 INICIANDO RUN OPTIMIZADO (PCA + {N_QUBITS} Qubits) 🚀")
 
     for epoch in range(start_epoch, EPOCHS):
         start_time = time.time()
@@ -166,9 +164,7 @@ async def train_hero_run():
         batch_start_from = start_batch_global if epoch == start_epoch else 0
 
         for i in range(0, len(X_train), BATCH_SIZE):
-            
             if batch_counter < batch_start_from:
-                print(f"⏩ Saltando Batch {batch_counter+1} (Ya procesado anteriormente)")
                 batch_counter += 1
                 continue 
 
@@ -180,21 +176,18 @@ async def train_hero_run():
             tapes_to_send = []
             tape_map = [] 
             
-            # 1. Generar Tapes 
             for j in range(len(x_batch)):
                 x_val = x_batch[j].detach().numpy()
                 with qml.tape.QuantumTape() as tape:
                     qml.AngleEmbedding(x_val, wires=range(N_QUBITS))
-                    qml.StronglyEntanglingLayers(weights, wires=range(N_QUBITS))
+                    qml.BasicEntanglerLayers(weights, wires=range(N_QUBITS))
                     qml.expval(qml.PauliZ(0))
 
                 g_tapes, fn = qml.gradients.param_shift(tape)
-                
                 start_idx = len(tapes_to_send)
                 tapes_to_send.extend(g_tapes)
                 tape_map.append((j, start_idx, len(g_tapes), fn))
 
-            # 2. Enviar al Scheduler
             results_storage.clear()
             batch_event.clear()
             current_batch_total = len(tapes_to_send)
@@ -227,7 +220,6 @@ async def train_hero_run():
             print(f"  Epoch {epoch+1} - Batch {batch_counter+1}: Esperando resultados IBM...      ", end="\r")
             await batch_event.wait()
             
-            # 3. Calcular Gradientes y Actualizar
             grad_w_accum = torch.zeros_like(weights)
             grad_b_accum = torch.tensor(0.0) 
             
@@ -253,52 +245,42 @@ async def train_hero_run():
             weights.grad = grad_w_accum
             bias.grad = grad_b_accum 
             
-            # 🟢 CORRECCIÓN: Guardar estado antes de actualizar para calcular el cambio
             weights_before = weights.clone().detach()
-
             optimizer.step()
             optimizer.zero_grad()
             
-            # 4. Calcular métricas y mostrar depuración
-            # 🟢 CORRECCIÓN: Calcular la pérdida de forma segura sumando el bias
             with torch.no_grad():
                 preds_batch = torch.stack([qnode(x_batch[j], weights) + bias for j in range(len(x_batch))])
                 batch_loss = torch.mean((preds_batch - y_target_pm)**2)
             
             epoch_loss += batch_loss.item()
-            
             weight_change = (weights - weights_before).abs().mean().item()
             grad_norm = grad_w_accum.norm().item()
             
-            print(f"\n  📈 Epoch {epoch+1} - Batch {batch_counter+1}:")
-            print(f"     Loss: {batch_loss.item():.6f}")
-            print(f"     Grad norm: {grad_norm:.6f}")
-            print(f"     Cambio pesos: {weight_change:.6f}")
-            print(f"     Pesos - Min: {weights.min().item():.6f}, Max: {weights.max().item():.6f}, Media: {weights.mean().item():.6f}")
-            print(f"     Bias: {bias.item():.6f}")
+            print(f"\n  📈 Epoch {epoch+1} - Batch {batch_counter+1}: Loss: {batch_loss.item():.4f} | Grad: {grad_norm:.4f}")
             
             save_checkpoint(epoch, batch_counter, optimizer, batch_loss.item())
             
-            # Limpiar circuitos generados de este batch
+            with open(CSV_FILE, mode='a', newline='') as file:
+                writer = csv.writer(file, delimiter=';')
+                writer.writerow([epoch+1, batch_counter+1, batch_loss.item(), grad_norm, weight_change, bias.item()])
+
             for k in range(len(tapes_to_send)):
                 fname = f"e{epoch}_b{batch_counter}_t{k}.py"
                 fpath = circuit_path(fname)
                 if os.path.exists(fpath):
                     os.remove(fpath)
-            print(f"     🗑️  {len(tapes_to_send)} circuitos limpiados")
             
             batches_done += 1
             batch_counter += 1
         
-        # Fin de Epoch
         avg_loss = epoch_loss / batches_done if batches_done > 0 else 0
         duration = time.time() - start_time
-        print(f"\n✅ Epoch {epoch+1} Completada | Loss promedio: {avg_loss:.6f} | Tiempo: {duration:.1f}s")
-        print(f"📊 Pesos finales epoch - Min: {weights.min().item():.6f}, Max: {weights.max().item():.6f}, Media: {weights.mean().item():.6f}")
+        print(f"\n✅ Epoch {epoch+1} Completada | Loss: {avg_loss:.4f} | Tiempo: {duration:.1f}s")
         print("=" * 80)
 
     await runner.cleanup()
-    print("🏆 ¡HERO RUN COMPLETADO!")
+    print("🏆 ¡RUN OPTIMIZADO COMPLETADO!")
 
 if __name__ == "__main__":
     asyncio.run(train_hero_run())
