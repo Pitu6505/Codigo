@@ -26,7 +26,6 @@ print(f"✅ Datos listos. Entrenamiento: 150, Testeo: 50. Qubits necesarios: 2")
 
 # --- 2. DEFINICIÓN DEL CIRCUITO CUÁNTICO (2 QUBITS) ---
 n_qubits = 2
-Capas_entrelazamiento = 6
 dev = qml.device("default.qubit", wires=n_qubits)
 
 @qml.qnode(dev, interface="torch")
@@ -40,8 +39,8 @@ def qnode(inputs, weights):
     # Medimos el valor esperado en el qubit 0
     return qml.expval(qml.PauliZ(0))
 
-# Inicializamos los pesos (Capas_entrelazamiento x 2 qubits = 12 pesos)
-init_weights = 0.1 * torch.randn(Capas_entrelazamiento, n_qubits)
+# Inicializamos los pesos (2 capas x 2 qubits = 4 pesos)
+init_weights = 0.1 * torch.randn(2, n_qubits)
 weights = torch.tensor(init_weights, requires_grad=True, dtype=torch.float32)
 bias = torch.tensor(0.0, requires_grad=True, dtype=torch.float32)
 
