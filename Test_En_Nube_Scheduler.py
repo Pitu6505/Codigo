@@ -11,7 +11,7 @@ from Utiles_Scheduler import circuit_path, ensure_circuits_dir, tape_to_qiskit_s
 # --- 1. CONFIGURACIÓN DEL EXPERIMENTO ---
 SCHEDULER_URL = "http://localhost:8082/"
 MY_LOCAL_IP = "http://localhost:5000"
-SHOTS = 1000
+SHOTS = 100
 N_QUBITS = 2
 PESOS_FILE = "pesos_two_moons.pth"
 

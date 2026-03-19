@@ -26,6 +26,7 @@ print(f"✅ Datos listos. Entrenamiento: 150, Testeo: 50. Qubits necesarios: 2")
 
 # --- 2. DEFINICIÓN DEL CIRCUITO CUÁNTICO (2 QUBITS) ---
 n_qubits = 2
+CAPAS_ENTRELZAMIENTO = 6
 dev = qml.device("default.qubit", wires=n_qubits)
 
 @qml.qnode(dev, interface="torch")
@@ -40,8 +41,8 @@ def qnode(inputs, weights):
     return qml.expval(qml.PauliZ(0))
 
 # Inicializamos los pesos (2 capas x 2 qubits = 4 pesos)
-init_weights = 0.1 * torch.randn(2, n_qubits)
-weights = torch.tensor(init_weights, requires_grad=True, dtype=torch.float32)
+init_weights = 0.1 * torch.randn(CAPAS_ENTRELZAMIENTO, n_qubits)
+weights = init_weights.clone().detach().requires_grad_(True)
 bias = torch.tensor(0.0, requires_grad=True, dtype=torch.float32)
 
 # --- 3. BUCLE DE ENTRENAMIENTO LOCAL ---
